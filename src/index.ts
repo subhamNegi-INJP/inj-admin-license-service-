@@ -15,6 +15,7 @@ import { errorHandler } from './middleware/errorHandler';
 import licenseRoutes from './routes/license.routes';
 import licensePoolRoutes from './routes/licensePool.routes';
 import licenseExternalRoutes from './routes/licenseExternal.routes';
+import jobsRoutes from './routes/jobs.routes';
 
 // Initialize Express app
 const app: Express = express();
@@ -105,6 +106,7 @@ app.use('/api/external', externalLimiter);
 app.use('/api/licenses', licenseRoutes);
 app.use('/api/license-pools', licensePoolRoutes);
 app.use('/api/external/licenses', licenseExternalRoutes);
+app.use('/api/jobs', jobsRoutes);
 
 // =============================================================================
 // 404 HANDLER

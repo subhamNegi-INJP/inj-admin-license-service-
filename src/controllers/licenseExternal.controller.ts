@@ -45,6 +45,36 @@ const daysUntil = (date: Date): number => {
 };
 
 /**
+ * Check if an addon has been cancelled (either immediately or scheduled for end of period)
+ * Addon is considered cancelled if:
+ * - status is 'CANCELLED', OR
+ * - cancelledAt is set (even if status is still 'ACTIVE' because it will expire at end of period)
+ */
+const isAddonCancelled = (addon: SubscriptionAddonData): boolean => {
+  return addon.status === 'CANCELLED' || !!addon.cancelledAt;
+};
+
+/**
+ * Check if an addon is effectively active
+ * An addon is effectively active if:
+ * - status is 'ACTIVE' (regardless of whether it's been cancelled for end of period), OR
+ * - status is 'CANCELLED' but expirationDate hasn't passed yet (continues until end of billing period)
+ */
+const isAddonEffectivelyActive = (addon: SubscriptionAddonData): boolean => {
+  if (addon.status === 'ACTIVE') {
+    return true;
+  }
+  
+  // Cancelled addons remain active until their expiration date
+  if (addon.status === 'CANCELLED' && addon.expirationDate) {
+    const expirationDate = new Date(addon.expirationDate);
+    return new Date() < expirationDate;
+  }
+  
+  return false;
+};
+
+/**
  * Format addon data for response
  */
 const formatAddonForResponse = (addon: SubscriptionAddonData) => ({
@@ -52,7 +82,10 @@ const formatAddonForResponse = (addon: SubscriptionAddonData) => ({
   name: addon.addonName,
   description: addon.addonDescription,
   status: addon.status,
-  isActive: addon.status === 'ACTIVE',
+  isActive: isAddonEffectivelyActive(addon),
+  isCancelled: isAddonCancelled(addon),
+  willExpireAtPeriodEnd: isAddonCancelled(addon) && addon.status === 'ACTIVE', // Cancelled but still active until period ends
+  cancelledAt: addon.cancelledAt,
   pricingType: addon.pricingType,
   price: addon.totalAmount,
   currency: addon.currency,
@@ -208,27 +241,38 @@ export const validateLicense = asyncHandler(async (req: ExternalApiRequest, res:
   
   if (includeSubscription || includeAddons || includeBilling) {
     enrichedData = await fetchEnrichedLicenseData(pool.subscriptionId, pool.clientId);
-    activeAddons = enrichedData.addons.filter(a => a.status === 'ACTIVE');
+    activeAddons = enrichedData.addons.filter(isAddonEffectivelyActive);
   } else {
     // Always fetch addons for feature access
     activeAddons = (await fetchSubscriptionAddons(pool.subscriptionId))
-      .filter(a => a.status === 'ACTIVE');
+      .filter(isAddonEffectivelyActive);
   }
 
   // Fetch product features to determine available addons
   const productFeatures = await fetchProductFeatures(pool.productId);
 
-  // Build combined features (license features + active addon feature codes)
-  const addonFeatureCodes = activeAddons.map(a => a.addonCode);
-  const baseFeatures = pool.selectedFeatures || pool.features;
-  const allFeatures = [...new Set([...baseFeatures, ...addonFeatureCodes])];
+  // Base features: features included in the license type
+  const baseFeatures = pool.features || [];
   
-  // Calculate available addons: product features NOT in base features and NOT already purchased
+  // Features: features selected from base features (what client actually has active)
+  const selectedFeatures = pool.selectedFeatures || [];
+  
+  // Active addon codes from subscription
+  const activeAddonCodes = activeAddons.map(a => a.addonCode);
+  
+  // All features = selected base features + active addon codes
+  const allFeatures = [...new Set([...selectedFeatures, ...activeAddonCodes])];
+  
+  // Addons: product features that are NOT in the license type's base features
   const baseFeatureCodesUpper = baseFeatures.map(f => f.toUpperCase());
-  const purchasedAddonCodesUpper = addonFeatureCodes.map(c => c.toUpperCase());
-  const availableAddons = productFeatures.filter(pf => 
-    !baseFeatureCodesUpper.includes(pf.code.toUpperCase()) &&
-    !purchasedAddonCodesUpper.includes(pf.code.toUpperCase())
+  const addons = productFeatures.filter(pf => 
+    !baseFeatureCodesUpper.includes(pf.code.toUpperCase())
+  );
+  
+  // Available addons: addons that are NOT already purchased (active)
+  const activeAddonCodesUpper = activeAddonCodes.map(c => c.toUpperCase());
+  const availableAddons = addons.filter(addon => 
+    !activeAddonCodesUpper.includes(addon.code.toUpperCase())
   );
 
   // If license key is provided, validate specific license
@@ -332,6 +376,8 @@ export const validateLicense = asyncHandler(async (req: ExternalApiRequest, res:
       },
       features: allFeatures,
       baseFeatures: baseFeatures,
+      selectedFeatures: selectedFeatures,
+      addons: addons,
       activeAddons: activeAddons.map(formatAddonForResponse),
       availableAddons: availableAddons,
     };
@@ -367,6 +413,8 @@ export const validateLicense = asyncHandler(async (req: ExternalApiRequest, res:
     },
     features: allFeatures,
     baseFeatures: baseFeatures,
+    selectedFeatures: selectedFeatures,
+    addons: addons,
     activeAddons: activeAddons.map(formatAddonForResponse),
     availableAddons: availableAddons,
   };
@@ -709,23 +757,34 @@ export const getPoolInfo = asyncHandler(async (req: ExternalApiRequest, res: Res
     fetchEnrichedLicenseData(pool.subscriptionId, pool.clientId),
     fetchProductFeatures(pool.productId),
   ]);
-  const activeAddons = enrichedData.addons.filter(a => a.status === 'ACTIVE');
+  const activeAddons = enrichedData.addons.filter(isAddonEffectivelyActive);
 
   // Check if pool is expired
   const isExpired = pool.expirationDate < new Date();
   const daysUntilExpirationVal = daysUntil(pool.expirationDate);
 
-  // Build combined features (license features + active addon features)
-  const addonFeatureCodes = activeAddons.map(a => a.addonCode);
-  const baseFeatures = pool.selectedFeatures || pool.features;
-  const allFeatures = [...new Set([...baseFeatures, ...addonFeatureCodes])];
+  // Base features: features included in the license type
+  const baseFeatures = pool.features || [];
   
-  // Calculate available addons: product features NOT in base features and NOT already purchased
+  // Features: features selected from base features (what client actually has active)
+  const selectedFeatures = pool.selectedFeatures || [];
+  
+  // Active addon codes from subscription
+  const activeAddonCodes = activeAddons.map(a => a.addonCode);
+  
+  // All features = selected base features + active addon codes
+  const allFeatures = [...new Set([...selectedFeatures, ...activeAddonCodes])];
+  
+  // Addons: product features that are NOT in the license type's base features
   const baseFeatureCodesUpper = baseFeatures.map(f => f.toUpperCase());
-  const purchasedAddonCodesUpper = addonFeatureCodes.map(c => c.toUpperCase());
-  const availableAddons = productFeatures.filter(pf => 
-    !baseFeatureCodesUpper.includes(pf.code.toUpperCase()) &&
-    !purchasedAddonCodesUpper.includes(pf.code.toUpperCase())
+  const addons = productFeatures.filter(pf => 
+    !baseFeatureCodesUpper.includes(pf.code.toUpperCase())
+  );
+  
+  // Available addons: addons that are NOT already purchased (active)
+  const activeAddonCodesUpper = activeAddonCodes.map(c => c.toUpperCase());
+  const availableAddons = addons.filter(addon => 
+    !activeAddonCodesUpper.includes(addon.code.toUpperCase())
   );
 
   // Get grace period status
@@ -789,8 +848,10 @@ export const getPoolInfo = asyncHandler(async (req: ExternalApiRequest, res: Res
     features: {
       all: allFeatures,
       base: baseFeatures,
+      selected: selectedFeatures,
+      addons: addons,
       activeAddons: activeAddons.map(formatAddonForResponse),
-      available: availableAddons,
+      availableAddons: availableAddons,
     },
   };
 

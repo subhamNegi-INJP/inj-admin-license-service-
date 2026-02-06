@@ -59,6 +59,7 @@ enum PoolStatus {
   ACTIVE
   INACTIVE
   EXPIRED
+  GRACE_PERIOD // Expired but in grace period
   SUSPENDED
 }
 

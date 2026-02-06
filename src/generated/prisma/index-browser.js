@@ -306,6 +306,7 @@ exports.PoolStatus = exports.$Enums.PoolStatus = {
   ACTIVE: 'ACTIVE',
   INACTIVE: 'INACTIVE',
   EXPIRED: 'EXPIRED',
+  GRACE_PERIOD: 'GRACE_PERIOD',
   SUSPENDED: 'SUSPENDED'
 };
 

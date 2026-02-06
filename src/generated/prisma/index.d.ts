@@ -57,6 +57,7 @@ export namespace $Enums {
   ACTIVE: 'ACTIVE',
   INACTIVE: 'INACTIVE',
   EXPIRED: 'EXPIRED',
+  GRACE_PERIOD: 'GRACE_PERIOD',
   SUSPENDED: 'SUSPENDED'
 };
 
