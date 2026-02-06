@@ -1,0 +1,383 @@
+// License Service Prisma Schema
+// Microservice for license lifecycle, allocation, validation, and device management
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+// License status
+enum LicenseStatus {
+  ACTIVE
+  INACTIVE
+  AVAILABLE // Not assigned (in pool)
+  ALLOCATED // Assigned to employee, not yet activated
+  EXPIRED
+  GRACE_PERIOD // Expired but in grace period
+  VIOLATION // Device limit exceeded
+  SUSPENDED
+  REVOKED // Permanently disabled
+  TERMINATED // License ended
+}
+
+// Device status
+enum DeviceStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+// Device type
+enum DeviceType {
+  DESKTOP
+  LAPTOP
+  MOBILE
+  TABLET
+  SERVER
+  OTHER
+}
+
+// Allocation action
+enum AllocationAction {
+  ALLOCATED
+  REVOKED
+  TRANSFERRED
+  EXPIRED
+}
+
+// Pool status
+enum PoolStatus {
+  ACTIVE
+  INACTIVE
+  EXPIRED
+  SUSPENDED
+}
+
+// =============================================================================
+// LICENSE POOL MODEL
+// Groups licenses for multi-seat subscriptions
+// =============================================================================
+model LicensePool {
+  id String @id @default(cuid())
+
+  // References to other services (denormalized)
+  clientId    String
+  clientName  String // Denormalized from Client Service
+  clientEmail String? // Denormalized from Client Service
+
+  subscriptionId String @unique
+
+  productId   String
+  productName String // Denormalized from Product Service
+  productCode String // Denormalized from Product Service
+
+  licenseTypeId   String
+  licenseTypeName String // Denormalized from Product Service
+
+  // Pool size
+  totalSeats     Int // Total seats purchased
+  allocatedSeats Int @default(0)
+  availableSeats Int // Computed: totalSeats - allocatedSeats
+
+  // Pool key (master key for multi-user/enterprise)
+  poolKey     String @unique
+  poolKeyHash String // For secure validation
+
+  // Validity
+  activationDate  DateTime?
+  expirationDate  DateTime
+  gracePeriodDays Int       @default(7)
+
+  // Features (denormalized from subscription)
+  features         String[] @default([])
+  selectedFeatures String[] @default([])
+
+  // === SUBSCRIPTION & BILLING INFO (denormalized) ===
+  billingCycle       String    @default("MONTHLY") // MONTHLY, YEARLY, PERPETUAL
+  pricePerSeat       Decimal?  @db.Decimal(10, 2)
+  totalAmount        Decimal?  @db.Decimal(12, 2)
+  currency           String    @default("INR")
+  subscriptionStatus String? // PENDING, ACTIVE, CANCELLED, EXPIRED
+  paymentStatus      String? // PENDING, COMPLETED, FAILED
+  autoRenew          Boolean   @default(true)
+  nextBillingDate    DateTime?
+
+  // Status
+  status   PoolStatus @default(ACTIVE)
+  isActive Boolean    @default(true)
+
+  // Relations
+  licenses    License[]
+  allocations LicenseAllocation[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clientId])
+  @@index([subscriptionId])
+  @@index([productId])
+  @@index([status])
+  @@map("license_pools")
+}
+
+// =============================================================================
+// LICENSE MODEL
+// Individual licenses within a pool or standalone
+// =============================================================================
+model License {
+  id             String  @id @default(cuid())
+  licenseKey     String  @unique // Format: LIC-{ProductCode}-{Type}-{Number}-{Hash}
+  licenseKeyHash String? // For secure validation
+
+  // References (denormalized)
+  clientId   String?
+  clientName String? // Denormalized from Client Service
+
+  productId   String
+  productName String // Denormalized from Product Service
+  productCode String // Denormalized from Product Service
+
+  licenseTypeId   String?
+  licenseTypeName String? // Denormalized from Product Service
+
+  status LicenseStatus @default(AVAILABLE)
+
+  // Pool reference (for multi-seat licenses)
+  poolId String?
+  pool   LicensePool? @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  // User assignment
+  userName  String?
+  userEmail String?
+
+  // Limits
+  deviceLimit  Int @default(1)
+  sessionLimit Int @default(1)
+
+  // Usage tracking
+  deviceCount     Int       @default(0)
+  currentSessions Int       @default(0)
+  lastActive      DateTime?
+
+  // Validity
+  activationDate DateTime?
+  expirationDate DateTime?
+
+  // Hardware binding (optional)
+  boundHardwareId String?
+
+  // Relations
+  devices        LicenseDevice[]
+  sessions       LicenseSession[]
+  allocations    LicenseAllocation[]
+  activationLogs LicenseActivationLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clientId])
+  @@index([productId])
+  @@index([licenseTypeId])
+  @@index([poolId])
+  @@index([status])
+  @@index([licenseKey])
+  @@index([userEmail])
+  @@map("licenses")
+}
+
+// =============================================================================
+// LICENSE DEVICE
+// Device tracking for licenses
+// =============================================================================
+model LicenseDevice {
+  id        String  @id @default(cuid())
+  licenseId String
+  license   License @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+
+  macAddress String
+  ipAddress  String?
+  hostname   String?
+  location   String?
+  deviceType DeviceType @default(DESKTOP)
+  deviceName String?
+  osInfo     String? // Operating system info
+
+  status     DeviceStatus @default(ACTIVE)
+  lastActive DateTime     @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([licenseId, macAddress])
+  @@index([licenseId])
+  @@index([status])
+  @@map("license_devices")
+}
+
+// =============================================================================
+// LICENSE SESSION MODEL
+// Active sessions for licenses
+// =============================================================================
+model LicenseSession {
+  id        String  @id @default(cuid())
+  licenseId String
+  license   License @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+
+  sessionToken String @unique
+
+  // Device info
+  deviceId   String?
+  deviceName String?
+
+  // Session details
+  ipAddress String?
+  userAgent String?
+  location  String?
+
+  startedAt      DateTime @default(now())
+  lastActivityAt DateTime @default(now())
+  expiresAt      DateTime
+
+  isActive        Boolean   @default(true)
+  terminatedAt    DateTime?
+  terminatedBy    String? // Admin who terminated
+  terminateReason String?
+
+  @@index([licenseId])
+  @@index([sessionToken])
+  @@index([isActive])
+  @@map("license_sessions")
+}
+
+// =============================================================================
+// LICENSE ALLOCATION MODEL
+// Track who license is allocated to (employees)
+// =============================================================================
+model LicenseAllocation {
+  id        String   @id @default(cuid())
+  licenseId String? // Specific license (single-user)
+  license   License? @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+
+  poolId String? // Or pool seat (multi-user)
+  pool   LicensePool? @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  clientId String
+
+  // Allocated to
+  employeeName  String
+  employeeEmail String
+  employeeId    String? // Internal employee ID
+  department    String?
+
+  // Allocation details
+  action          AllocationAction @default(ALLOCATED)
+  allocatedAt     DateTime         @default(now())
+  allocatedById   String? // ClientUser ID who allocated
+  allocatedByName String? // Name for audit trail
+
+  // Activation
+  activatedAt DateTime?
+
+  // Revocation
+  revokedAt     DateTime?
+  revokedById   String?
+  revokedByName String?
+  revokeReason  String?
+
+  // Transfer (if transferred from someone)
+  transferredFrom String? // Previous allocation ID
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([licenseId])
+  @@index([poolId])
+  @@index([clientId])
+  @@index([employeeEmail])
+  @@index([isActive])
+  @@map("license_allocations")
+}
+
+// =============================================================================
+// LICENSE ACTIVATION LOG MODEL
+// Audit trail for license activation events
+// =============================================================================
+model LicenseActivationLog {
+  id        String  @id @default(cuid())
+  licenseId String
+  license   License @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+
+  action String // ACTIVATED, DEACTIVATED, DEVICE_ADDED, DEVICE_REMOVED, BLOCKED, UNBLOCKED, VALIDATION_CHECK
+
+  // Device info
+  deviceId   String?
+  deviceType String?
+  deviceName String?
+  macAddress String?
+
+  // Request context
+  ipAddress String?
+  userAgent String?
+  location  String? // Geo-location
+
+  // Result
+  success      Boolean @default(true)
+  errorMessage String?
+
+  // User context
+  performedBy     String? // User ID who performed the action
+  performedByName String? // Name for audit
+
+  timestamp DateTime @default(now())
+
+  @@index([licenseId])
+  @@index([timestamp])
+  @@index([action])
+  @@map("license_activation_logs")
+}
+
+// =============================================================================
+// LICENSE USAGE STATS MODEL
+// Usage statistics for analytics
+// =============================================================================
+model LicenseUsageStats {
+  id        String  @id @default(cuid())
+  licenseId String?
+  poolId    String?
+  clientId  String
+  productId String
+
+  // Time period
+  periodStart DateTime
+  periodEnd   DateTime
+  periodType  String // DAILY, WEEKLY, MONTHLY
+
+  // Metrics
+  activeUsers    Int @default(0)
+  totalSessions  Int @default(0)
+  totalDuration  Int @default(0) // Minutes
+  peakConcurrent Int @default(0)
+
+  // Feature usage (JSON for flexibility)
+  featureUsage Json?
+
+  createdAt DateTime @default(now())
+
+  @@unique([licenseId, periodStart, periodType])
+  @@unique([poolId, periodStart, periodType])
+  @@index([clientId])
+  @@index([productId])
+  @@index([periodStart])
+  @@map("license_usage_stats")
+}
